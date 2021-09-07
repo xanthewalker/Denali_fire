@@ -1,0 +1,357 @@
+---
+title: "Denali_ordination_final"
+author: "Mélanie Jean"
+date: "23/04/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+setwd("~/Dropbox/PDF NAU/Denali Fire/Submission/Re-analysis")
+```
+
+
+## Redo the analyses for the ordination using modified cover data
+Here, we use the cover data measured on the transects before and after fire, and complete it by adding a "presence", i.e. 0.1 value to all the species that were found in the full plot survey data, but not captured by the transects. 
+
+Open useful librairies
+```{r results='hide', message=FALSE, warning=FALSE}
+library(vegan)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(vegan)
+library(scales)
+library(reshape2)
+library(stringr)
+library(stargazer)
+library(directlabels)
+library(indicspecies)
+library(xtable)
+library(ggrepel)
+library(gtools)
+library(cowplot)
+library(egg)
+```
+
+Import species data. 
+```{r import data}
+# Load the cover data
+cover=read.csv("Denali_cover_April2021.csv", header=TRUE)
+names(cover)
+head(cover)
+str(cover)
+dim(cover)
+na.omit(cover)
+
+# Load the frequency data that was converted to 0.5 if present
+freq=read.csv("Frequency_to_presence.csv", header=TRUE)
+names(freq)
+str(cover)
+head(freq)
+dim(freq)
+na.omit(freq)
+
+### All columns, nested for loops!
+for (k in seq(6,ncol(cover))){
+for (i in seq(1,nrow(cover))){
+  if(cover[i,k]<=0){
+    cover[i,k]=freq[i,k]}
+}
+}
+cover_merged=cover
+
+write.csv(cover_merged, "cover_merged.csv")
+
+cover2=read.csv("cover_merged.csv", header=TRUE)[,-1]
+head(cover2)
+```
+
+
+Data was pre removed from WC23 and WC25, which removed a few species from the dataset that were only found there. 
+Other species were found at only one site x sampling time and were removed. Some researchers suggest eliminating species which occur at single sites because of the inflated correlations created by attempting to relate potentially random features at that site to its lone occurrence (Legendre and Legendre, 1998; Poos and Jackson 2012). 
+```{r}
+denali=cover2
+names(denali)
+denali$PrePost=as.factor(denali$PrePost)
+denali$GRID_ID=as.factor(denali$GRID_ID)
+
+# Now, remove all species columns that sum to zero or that are present at only one site. 
+denali.spe=denali[,6:ncol(denali)]
+dim(denali.spe) # 103 columns
+
+colSums(denali.spe) # poapal and carcan
+colSums(denali.spe != 0) # Will have to remove all the columns that have a colSums =<1
+
+denali.spe.red = denali.spe[,colSums(denali.spe != 0) > 1.5]
+dim(denali.spe.red) # 80 columns - 23 species dropped
+
+rowSums(denali.spe.red != 0) # Verify that there are no empty sites - ok 
+
+# Add row names
+rownames(denali.spe.red)=denali$GridPlotYear
+```
+
+
+
+Create the Bray-Curtis distance-matrix associated with the species.
+```{r distance matrix}
+# All sites and grids
+spe=denali.spe.red 
+total.d=vegdist(spe, method='bray')
+```
+
+
+Include the environmental variables and spruce density. 
+```{r}
+env.total=read.csv("Site_Denali_Apr2021_2.csv", header=T)
+names(env.total)
+
+# All sites and grids
+total.table=full_join(denali, env.total)%>%
+    filter(!Grid_plot %in% c("WC25", "WC23", "ET26", "ET27", "ET28", "WC26", "WC27", "WC28"))%>%
+    dplyr::select(PrePost, GRID_ID, Grid_plot, GridPlotYear, density_spruce) %>%
+    plyr::mutate(density_spruce1, group1=quantcut(density_spruce, q=3))%>%
+    mutate(Density_code=plyr::revalue(group1, c("0"="low", "(0,0.0249]"="mid", "(0.0249,0.229]"="high")))
+
+total.table$Density_code=as.factor(total.table$Density_code)
+total.table$PrePost=as.factor(total.table$PrePost)
+total.table$GRID_ID=as.factor(total.table$GRID_ID)
+total.table$Grid_plot=as.factor(total.table$Grid_plot)
+total.table$GridPlotYear=as.factor(total.table$GridPlotYear)
+
+```
+
+
+### Verify multivariate dispersion
+
+Check that multivariate dispersion is ok with the whole data. 
+```{r}
+Disp_Dens=betadisper(total.d,total.table$Density_code) # significant difference in dispersion p=0.01
+anova(Disp_Dens) #0.06326
+permutest(Disp_Dens) # 0.054 --- ok
+TukeyHSD(Disp_Dens) # no difference
+
+Disp_Fire=betadisper(total.d,total.table$PrePost) # significant difference in dispersion p=0.01
+anova(Disp_Fire) #0.0001
+permutest(Disp_Fire) # 0.001
+
+Disp_Grid=betadisper(total.d,total.table$GRID_ID) # significant difference in dispersion p=0.01
+anova(Disp_Grid) #0.005047
+permutest(Disp_Grid) # 0.009
+
+DispMoss3=betadisper(total.d,interaction(total.table$GRID_ID,total.table$PrePost)) # significant diffenrence in dispersion p=0.01
+anova(DispMoss3) # <0.0001
+permutest(DispMoss3) # 0.001
+TukeyHSD(DispMoss3) # everything except the two post fire grids differ
+
+DispMoss4=betadisper(total.d,interaction(total.table$GRID_ID,total.table$PrePost, total.table$Density_code)) # significant diffenrence in dispersion p=0.01
+anova(DispMoss4) # 0.0007534
+permutest(DispMoss4) # 0.016
+
+TukeyHSD(DispMoss4) # Only one pair differs from one another though. 
+# no difference
+
+```
+
+There are issues with multivariate dispersion that are exacerbated in this frequency dataset compared to the cover dataset: 
+In Jean et al. 2017: "Multivariate dispersion differed between the different successional stages but not among forest types. This is a well-recognized issue with multivariate analyses, which can lead to confusion between within-group variation (dispersion) and mean values of the groups. PerMANOVA is thought to be less sensitive to this issue than some of its alternatives (ANOSIM or MRPP) (Anderson 2001)."
+
+In our data, the main issue seems to come from using the two grids together. One approach to verify that this is not confounding our findings is the also run separate analyses for each grid. - **See what you get and decide what to include where**
+
+Check multivariate within each grid for PrePost, density and interaction
+
+
+### Run permanovas
+Run the perMANOVA to see whether there is a difference in species composition between pre- and post-fire and between spruce density in thre categories. I first ran the model with the interaction, but since it was not significant the interaction was dropped from the final model. The strata argument indicates the random gripoint (site) effect. 
+```{r}
+# All sites and grids
+set.seed(5)
+fit1<- adonis(formula = total.d ~ PrePost*Density_code,
+                                data = total.table,
+                                strata=total.table$Grid_plot, 
+                                perm = 1000)
+fit1 # No interaction
+
+# Remove non significant interaction 
+set.seed(5)
+fit2<- adonis(formula = total.d ~ PrePost+Density_code,
+                                data = total.table,
+                                strata=total.table$Grid_plot, 
+                                perm = 1000)
+fit2
+
+pairwise.adonis(x=spe,factors=total.table$Density_code, sim.function='vegdist',sim.method='bray',p.adjust.m='holm')
+# Difference between low and high. 
+```
+
+
+##### All grids
+Run the NMDS with two dimensions for all sites and grids. 
+```{r run the nmds}
+set.seed(7)
+tp.nmds <- metaMDS(total.d, k = 2, trymax = 100)
+stressplot(tp.nmds)
+plot(tp.nmds, type="text")
+tp.nmds$stress #0.15 not too bad
+```
+
+```{r}
+tp.scores <- as.data.frame(scores(tp.nmds))
+tp.scores$gridpoint <- denali$Grid_plot
+tp.scores$Treatment=denali$PrePost
+tp.scores$grid=denali$GRID_ID
+tp.scores$Density=total.table$Density_code
+tp.scores$inter=interaction(tp.scores$Density, tp.scores$Treatment)
+levels(tp.scores$inter)
+tp.scores$inter <- factor(tp.scores$inter, levels = c("low.pre", "mid.pre", "high.pre","low.post","mid.post","high.post"))
+```
+
+```{r}
+# Ellipses for interaction
+NMDS = data.frame(MDS1 = tp.nmds$points[,1], MDS2 = tp.nmds$points[,2],group=tp.scores$inter)
+NMDS.mean=aggregate(NMDS[,1:2],list(group=NMDS$group),mean)
+
+  veganCovEllipse<-function (cov, center = c(0, 0), scale = 1, npoints = 100) 
+  {
+    theta <- (0:npoints) * 2 * pi/npoints
+    Circle <- cbind(cos(theta), sin(theta))
+    t(center + scale * t(Circle %*% chol(cov)))
+  }
+
+  df_ell <- data.frame()
+  for(g in levels(NMDS$group)){
+    df_ell <- rbind(df_ell, cbind(as.data.frame(with(NMDS[NMDS$group==g,],
+                    veganCovEllipse(cov.wt(cbind(MDS1,MDS2),wt=rep(1/length(MDS1),length(MDS1)))$cov,center=c(mean(MDS1),mean(MDS2)))))
+                    ,group=g))
+  }
+
+# Ellipses for fire
+NMDS.fire = data.frame(MDS1 = tp.nmds$points[,1], MDS2 = tp.nmds$points[,2],group=tp.scores$Treatment)
+NMDS.mean.fire=aggregate(NMDS[,1:2],list(group=NMDS$group),mean)
+
+  df_ell_fire <- data.frame()
+  for(g in levels(NMDS.fire$group)){
+    df_ell_fire <- rbind(df_ell_fire, cbind(as.data.frame(with(NMDS.fire[NMDS.fire$group==g,],
+                    veganCovEllipse(cov.wt(cbind(MDS1,MDS2),wt=rep(1/length(MDS1),length(MDS1)))$cov,center=c(mean(MDS1),mean(MDS2)))))
+                    ,group=g))
+  }
+
+# Ellipses for density  
+NMDS.dens = data.frame(MDS1 = tp.nmds$points[,1], MDS2 = tp.nmds$points[,2],group=tp.scores$Density)
+NMDS.mean.dens=aggregate(NMDS.dens[,1:2],list(group=NMDS$group),mean)
+
+  df_ell_dens <- data.frame()
+  for(g in levels(NMDS.dens$group)){
+    df_ell_dens <- rbind(df_ell_dens, cbind(as.data.frame(with(NMDS.dens[NMDS.dens$group==g,],
+                    veganCovEllipse(cov.wt(cbind(MDS1,MDS2),wt=rep(1/length(MDS1),length(MDS1)))$cov,center=c(mean(MDS1),mean(MDS2)))))
+                    ,group=g))
+  }
+  
+  
+  
+  # Fix the oder of factors so that the color order is the same
+
+levels(tp.scores$inter)
+df_ell$group=(as.factor(df_ell$group))
+levels(df_ell$group)
+df_ell$group <- factor(df_ell$group, levels = c(levels(tp.scores$inter)))
+levels(df_ell$group)
+
+lightgreen="#A1D99B"
+mediumgreen="#238B45"
+darkgreen="#00441B"
+
+p1 <- ggplot() +
+  #geom_path(data=df_ell_fire, aes(x=MDS1, y=MDS2, color=group), size=0.75, linetype=1)+
+  geom_path(data = tp.scores, aes(x = NMDS1, y = NMDS2, group=gridpoint), col="grey")+
+  geom_point(data = tp.scores, aes(x = NMDS1, y = NMDS2, shape=grid, fill=inter), size=3., col="black")+
+  #geom_path(data=df_ell, aes(x=MDS1, y=MDS2, color=group), size=0.75, linetype=1)+
+  geom_path(data=df_ell_dens, aes(x=MDS1, y=MDS2, color=group), size=0.75, linetype=1)+
+  scale_shape_manual(values=c(21,24))+
+  scale_fill_manual(values=c(lightgreen, mediumgreen, darkgreen, "gray86","gray44","gray10"))+
+  #scale_color_manual(values=c(lightgreen, mediumgreen, darkgreen, "gray86","gray44","gray10"))+
+  scale_color_manual(values=c(darkgreen, lightgreen, mediumgreen))+
+  theme_bw()+ 
+  coord_fixed()+  ## need aspect ratio of 1!
+  theme(legend.position = 'right', 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  annotate("text", x = -0.4, y = 0.65, label = "a)")
+p1
+```
+
+Species envfit since scores are not available anymore
+```{r}
+vec.sp <- envfit(tp.scores[,c(1,2)], spe, perm=999, p.max=0.05)
+scores(vec.sp, display = "vectors")
+vec.sp.df <- as.data.frame(scores(vec.sp, display = "vectors"))
+vec.sp.df$species <- rownames(vec.sp.df)
+
+spp.scrs <- as.data.frame(scores(vec.sp, display = "vectors"))
+spp.scrs <- cbind(spp.scrs, Species = rownames(spp.scrs))
+
+## Select only significant species
+ef<-envfit(tp.scores[,c(1,2)], spe, perm=999) #### Select the good columns !!!!!!
+ef.df<-as.data.frame(ef$vectors$arrows*sqrt(ef$vectors$r))
+ef.df$species<-rownames(ef.df)
+
+#only significant pvalues
+#shortcutting ef$vectors
+A <- as.list(ef$vectors)
+#creating the dataframe
+pvals<-as.data.frame(A$pvals)
+arrows<-as.data.frame(A$arrows*sqrt(A$r))
+C<-cbind(spp.scrs, pvals) ### Using the coordinates obtained from Gavin Simpson's answer
+#subset
+Cred<-subset(C,pvals<0.002) # Too many!
+Cred <- cbind(Cred, Species = rownames(Cred))
+dim(Cred)
+```
+
+ggplot it
+```{r NMDS plots}
+p1 <- ggplot() +
+  #geom_path(data=df_ell_fire, aes(x=MDS1, y=MDS2, color=group), size=0.75, linetype=1)+
+  geom_path(data = tp.scores, aes(x = NMDS1, y = NMDS2, group=gridpoint), col="grey")+
+  geom_point(data = tp.scores, aes(x = NMDS1, y = NMDS2, shape=grid, fill=inter), size=3., col="black")+
+  #geom_path(data=df_ell, aes(x=MDS1, y=MDS2, color=group), size=0.75, linetype=1)+
+  geom_path(data=df_ell_dens, aes(x=MDS1, y=MDS2, color=group), size=0.75, linetype=1)+
+  scale_shape_manual(values=c(21,24))+
+  scale_fill_manual(values=c(lightgreen, mediumgreen, darkgreen, "gray86","gray44","gray10"))+
+  #scale_color_manual(values=c(lightgreen, mediumgreen, darkgreen, "gray86","gray44","gray10"))+
+  scale_color_manual(values=c(darkgreen, lightgreen, mediumgreen))+
+  theme_bw()+ 
+  coord_fixed()+  ## need aspect ratio of 1!
+  theme(legend.position = 'none', 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  annotate("text", x = -0.4, y = 0.65, label = "a)")
+p1
+
+# Half the length of the species arrows to make the plots more compact
+p2<- ggplot() +
+    geom_path(data = tp.scores, aes(x = NMDS1, y = NMDS2, group=gridpoint), col="grey")+
+  geom_segment(data = Cred[,-5],
+               aes(x = 0, xend = NMDS1/2, y = 0, yend = NMDS2/2),
+               arrow = arrow(length = unit(0.25, "cm")), colour = "gray32")+ # remove the duplicated column
+  geom_point(data = tp.scores, aes(x = NMDS1, y = NMDS2,  fill=interaction(Density, Treatment) ,shape=grid), size=3)+#»
+  scale_shape_manual(values=c(21,24))+
+  scale_fill_manual(values=c( "gray86","gray44","gray10", lightgreen, mediumgreen, darkgreen))+
+  scale_color_manual(values=c("gray10", "#00441B" ,"gray86", "#A1D99B","gray44","#238B45" ))+
+  theme_bw()+ 
+  coord_fixed()+  ## need aspect ratio of 1!
+  geom_text_repel(data = Cred[,-5], aes(x = NMDS1/2, y = NMDS2/2, label = Species),size = 3 ,max.overlaps = 75)+
+  theme_bw()+ 
+  theme(legend.position = 'none', 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  labs(x="NMDS1", y="NMDS2")+
+  annotate("text", x = -0.5, y = 0.52, label = "b)")
+p2
+
+
+#Make a plot with p1 showing sites and link, p2 showing species
+ggarrange(p1, p2, ncol = 2)
+
+```
